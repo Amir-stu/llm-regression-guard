@@ -1,0 +1,147 @@
+name: prompt-eval
+
+# Runs the golden-dataset eval whenever anything that can change model
+# behaviour changes: the prompts, the dataset, or the eval engine itself.
+on:
+  pull_request:
+    paths:
+      - "prompts/**"
+      - "data/**"
+      - "src/regression_guard/**"
+      - ".github/workflows/eval.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Prompt version to evaluate (default: latest)"
+        required: false
+        default: "latest"
+
+concurrency:
+  group: prompt-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests
+      - run: pytest --cov --cov-report=term-missing --cov-fail-under=80
+
+  eval:
+    name: golden-dataset eval
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The run history lives in the repo's eval branch, not in the PR, so
+          # fetch enough to restore the baseline database below.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -e ".[dev,openai]"
+
+      - name: Restore run history
+        # The baseline is whatever the last accepted run recorded. Losing it
+        # would silently turn every PR into "no baseline found", which passes
+        # unconditionally - so a cache miss is visible in the log, not fatal.
+        uses: actions/cache@v4
+        with:
+          path: runs/eval_runs.db
+          key: eval-db-${{ github.run_id }}
+          restore-keys: |
+            eval-db-
+
+      - name: Validate the golden dataset
+        run: rg validate
+
+      - name: Run eval and diff against baseline
+        id: eval
+        env:
+          # Falls back to the offline mock provider when no key is configured,
+          # so a fork PR still gets a real (if simulated) signal instead of a
+          # broken job.
+          RG_PROVIDER: ${{ secrets.OPENAI_API_KEY != '' && 'openai' || 'mock' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RG_WARN_DELTA: "0.03"
+          RG_CRITICAL_DELTA: "0.08"
+        run: |
+          set +e
+          rg run \
+            --prompt "${{ github.event.inputs.prompt || 'latest' }}" \
+            --markdown-out runs/summary.md \
+            --json-out runs/comparison.json
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Upload diff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: |
+            runs/reports/
+            runs/comparison.json
+          retention-days: 30
+
+      - name: Comment the scorecard on the PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'runs/summary.md';
+            if (!fs.existsSync(path)) return;
+            const body = fs.readFileSync(path, 'utf8')
+              + `\n\n<sub>[Full report](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) - artifact \`eval-report\`</sub>`;
+            const marker = '### ';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            // Update the existing scorecard instead of stacking a new comment
+            // on every push - a 30-comment thread is how people learn to
+            // ignore the bot.
+            const mine = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Prompt eval:'));
+            if (mine) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: mine.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      - name: Block the merge on a critical regression
+        # Exit codes: 0 pass, 1 warn, 2 critical, 3 config error.
+        run: |
+          code="${{ steps.eval.outputs.exit_code }}"
+          case "$code" in
+            0) echo "Eval passed." ;;
+            1) echo "::warning::Eval raised a warning." ;;
+            2) echo "::error::Critical regression detected. See the eval-report artifact."; exit 1 ;;
+            *) echo "::error::Eval failed to run (exit $code)."; exit 1 ;;
+          esac

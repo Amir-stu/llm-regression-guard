@@ -1,0 +1,15 @@
+version: v3-terse
+created_at: "2026-08-20T08:15:00Z"
+description: >
+  Token-reduction experiment. Strips the category cue lists and the few-shot
+  examples to cut prompt cost by roughly 70%. This is the change the pipeline
+  is meant to catch: it looks like a harmless cleanup in review.
+temperature: 0.0
+system_prompt: |
+  Classify the support email into billing, technical, account or general and
+  summarise it.
+
+  Reply with JSON only: {"category": "...", "summary": "..."}
+user_template: |
+  {email}
+few_shot: []

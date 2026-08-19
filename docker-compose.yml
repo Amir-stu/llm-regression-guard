@@ -1,0 +1,18 @@
+services:
+  eval:
+    build: .
+    environment:
+      # Defaults to the offline provider. Set RG_PROVIDER=openai and supply a
+      # key to run against the real API.
+      RG_PROVIDER: ${RG_PROVIDER:-mock}
+      RG_MODEL: ${RG_MODEL:-gpt-4o-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      RG_WARN_DELTA: ${RG_WARN_DELTA:-0.03}
+      RG_CRITICAL_DELTA: ${RG_CRITICAL_DELTA:-0.08}
+    volumes:
+      # Persist run history so the baseline survives `docker compose up` twice.
+      - eval-runs:/app/runs
+
+volumes:
+  eval-runs:
