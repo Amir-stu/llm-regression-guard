@@ -1,2 +1,5 @@
 pydantic>=2.6
 pyyaml>=6.0
+# Hosted dashboard only (Streamlit Community Cloud installs this file).
+# The package itself needs just the two lines above; see pyproject.toml.
+streamlit>=1.50,<2

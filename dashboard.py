@@ -3,16 +3,23 @@
     pip install -e ".[dashboard]"
     streamlit run dashboard.py
 
-Read-only: it opens the same SQLite file `rg run` writes (RG_DB_PATH) and
-never calls a model. All data shaping lives in
-`regression_guard.dashboard_data`, which is unit-tested; this file only lays
-out tables and charts.
+It opens the same SQLite file `rg run` writes (RG_DB_PATH) and never calls a
+model. When that file holds no runs, as on a fresh Streamlit Community Cloud
+deployment, it is seeded once with the offline mock demo and says so on the
+page. All data shaping lives in `regression_guard.dashboard_data`, which is
+unit-tested; this file only lays out tables and charts.
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
+
+# Hosted deployments install requirements.txt but not the package itself.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from regression_guard.config import DEFAULT_SUMMARY_PASS_THRESHOLD, JUDGE_SCALE_MAX, JUDGE_SCALE_MIN, Settings
 from regression_guard.dashboard_data import (
@@ -22,6 +29,7 @@ from regression_guard.dashboard_data import (
     pass_rate_trend,
     side_by_side,
 )
+from regression_guard.demo_seed import seed_demo_history
 from regression_guard.error_analysis import analyse
 from regression_guard.models import RunSummary
 from regression_guard.store import RunStore
@@ -142,17 +150,26 @@ def _analysis_section(
     )
 
 
+@st.cache_resource
+def _seed_once(db_path: str) -> int:
+    """Seed at most once per server process, however many visitors arrive."""
+    return seed_demo_history(RunStore(db_path), Settings.from_env())
+
+
 def main() -> None:
     st.set_page_config(page_title="regression-guard", layout="wide")
     st.title("regression-guard")
     settings = Settings.from_env()
     store = RunStore(settings.db_path)
+    _seed_once(str(settings.db_path))
     runs = store.recent_runs(limit=HISTORY_LIMIT)
-    if not runs:
-        st.info(f"No runs in {settings.db_path}. Run `python scripts/demo.py` or `rg run` first.")
-        return
     current, baseline, threshold = _sidebar(runs)
-    st.caption(f"Reading {settings.db_path.name}, {len(runs)} runs")
+    simulated = (
+        " Runs from the offline mock provider: simulated outputs, no model was called."
+        if all(run.provider == "mock" for run in runs)
+        else ""
+    )
+    st.caption(f"Reading {settings.db_path.name}, {len(runs)} runs.{simulated}")
     _headline(current, baseline)
     _analysis_section(current, baseline, store, threshold)
     _trend_section(runs, store, threshold)
