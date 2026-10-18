@@ -37,7 +37,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: ruff check src tests
+      - run: ruff check src tests dashboard.py
       - run: pytest --cov --cov-report=term-missing --cov-fail-under=80
 
   eval:
