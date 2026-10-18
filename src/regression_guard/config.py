@@ -27,6 +27,10 @@ JUDGE_SCALE_MAX = 5
 # A test case passes when the category is exact AND the judge score clears this.
 DEFAULT_SUMMARY_PASS_THRESHOLD = 3
 
+# Output contract for the summary, enforced by deterministic assertions. Same
+# limit the golden dataset holds its own reference summaries to.
+MAX_SUMMARY_CHARS = 220
+
 
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)

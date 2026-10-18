@@ -34,6 +34,11 @@ reference:
 Judge content, not style. Do not reward extra length.
 Reply with JSON only: {"score": <1-5>, "reason": "<max 20 words>"}"""
 
+# Reason prefixes for judge outcomes that say nothing about output quality.
+# Error analysis keys on these to separate infrastructure noise from failures.
+JUDGE_CALL_FAILED = "judge call failed"
+JUDGE_UNPARSEABLE = "judge response unparseable"
+
 _SCORE_RE = re.compile(r'"?score"?\s*[:=]\s*([1-5])')
 
 
@@ -56,7 +61,7 @@ def parse_judge_response(raw: str) -> tuple[int, str]:
     match = _SCORE_RE.search(text)
     if match:
         return int(match.group(1)), "recovered from unstructured judge reply"
-    return 3, "judge response unparseable; scored neutral"
+    return 3, f"{JUDGE_UNPARSEABLE}; scored neutral"
 
 
 async def judge_summary(

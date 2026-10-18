@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS case_results (
     completion_tokens   INTEGER NOT NULL DEFAULT 0,
     error               TEXT,
     difficulty          TEXT NOT NULL DEFAULT 'easy',
+    assertion_failures  TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (run_id, case_id),
     FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
 );
@@ -69,6 +70,19 @@ class RunStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Bring a database written by an older schema up to date in place.
+
+        Run history is the baseline, so an upgrade must never require
+        deleting it. Columns are only ever added, with a default that reads
+        correctly for the old rows.
+        """
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(case_results)")}
+        if "assertion_failures" not in columns:
+            conn.execute("ALTER TABLE case_results ADD COLUMN assertion_failures TEXT NOT NULL DEFAULT '[]'")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -100,12 +114,25 @@ class RunStore:
             )
             conn.executemany(
                 """
-                INSERT OR REPLACE INTO case_results VALUES
+                INSERT OR REPLACE INTO case_results
+                (run_id, case_id, expected_category, predicted_category, predicted_summary,
+                 category_match, judge_score, judge_reason, passed, latency_ms,
+                 prompt_tokens, completion_tokens, error, difficulty, assertion_failures)
+                VALUES
                 (:run_id, :case_id, :expected_category, :predicted_category, :predicted_summary,
                  :category_match, :judge_score, :judge_reason, :passed, :latency_ms,
-                 :prompt_tokens, :completion_tokens, :error, :difficulty)
+                 :prompt_tokens, :completion_tokens, :error, :difficulty, :assertion_failures)
                 """,
-                [{"run_id": summary.run_id, **r.model_dump(mode="json")} for r in results],
+                [
+                    {
+                        **r.model_dump(mode="json"),
+                        "run_id": summary.run_id,
+                        "assertion_failures": json.dumps(
+                            [a.model_dump(mode="json") for a in r.assertion_failures]
+                        ),
+                    }
+                    for r in results
+                ],
             )
 
     @staticmethod
@@ -131,6 +158,7 @@ class RunStore:
             data.pop("run_id", None)
             data["category_match"] = bool(data["category_match"])
             data["passed"] = bool(data["passed"])
+            data["assertion_failures"] = json.loads(data["assertion_failures"])
             out.append(CaseResult.model_validate(data))
         return out
 

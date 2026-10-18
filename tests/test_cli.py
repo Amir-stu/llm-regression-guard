@@ -104,7 +104,9 @@ def test_fail_on_warn_is_opt_in(cli_env, monkeypatch):
     """A team that wants warnings to block gets it with a flag, not a fork."""
     monkeypatch.setenv("RG_WARN_DELTA", "0.01")
     monkeypatch.setenv("RG_CRITICAL_DELTA", "0.90")
-    monkeypatch.setenv("RG_SIGNIFICANCE_ALPHA", "0.0000001")
+    # Alpha 0 disables the significance route to CRITICAL, so only the size
+    # thresholds above decide - v3's drop is far too significant otherwise.
+    monkeypatch.setenv("RG_SIGNIFICANCE_ALPHA", "0")
     main(["run", "--prompt", "v2-tightened", "--no-slack"])
     lenient = main(["run", "--prompt", "v3-terse", "--no-slack"])
     assert lenient == EXIT_PASS

@@ -10,6 +10,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .assertions import has_hard_failure, run_assertions
 from .classifier import ClassificationError, classify_email
 from .config import (
     CATEGORY_WEIGHT,
@@ -19,7 +20,7 @@ from .config import (
     SUMMARY_WEIGHT,
     Settings,
 )
-from .judge import judge_summary
+from .judge import JUDGE_CALL_FAILED, judge_summary
 from .models import CaseResult, GoldenDataset, PromptConfig, RunSummary
 from .providers import LLMProvider
 
@@ -81,6 +82,7 @@ async def _run_case(
             )
 
         match = case.accepts(call.output.category)
+        assertion_failures = run_assertions(case, call.output, call.raw)
         try:
             score, reason = await judge_summary(
                 case.email,
@@ -90,7 +92,7 @@ async def _run_case(
                 settings.judge_model,
             )
         except Exception as exc:  # noqa: BLE001 - judge failure is not a quality regression
-            score, reason = 3, f"judge call failed: {type(exc).__name__}"
+            score, reason = 3, f"{JUDGE_CALL_FAILED}: {type(exc).__name__}"
 
         return CaseResult(
             case_id=case.id,
@@ -100,11 +102,12 @@ async def _run_case(
             category_match=match,
             judge_score=score,
             judge_reason=reason,
-            passed=match and score >= summary_pass_threshold,
+            passed=match and score >= summary_pass_threshold and not has_hard_failure(assertion_failures),
             latency_ms=call.latency_ms,
             prompt_tokens=call.prompt_tokens,
             completion_tokens=call.completion_tokens,
             difficulty=case.expected_difficulty,
+            assertion_failures=assertion_failures,
         )
 
 

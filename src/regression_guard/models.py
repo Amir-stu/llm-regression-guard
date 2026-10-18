@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Category(enum.StrEnum):
@@ -27,6 +27,24 @@ class Difficulty(enum.StrEnum):
     EASY = "easy"
     MEDIUM = "medium"
     HARD = "hard"
+
+
+class Severity(enum.StrEnum):
+    """Whether a failed deterministic check fails the case (hard) or is only
+    counted in error analysis (soft)."""
+
+    HARD = "hard"
+    SOFT = "soft"
+
+
+class AssertionFailure(BaseModel):
+    """One deterministic check that did not hold for a model output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    check: str
+    severity: Severity
+    detail: str = ""
 
 
 class ClassificationOutput(BaseModel):
@@ -86,6 +104,11 @@ class GoldenCase(BaseModel):
     # Cases that a reasonable human could file under two headings. The scorer
     # accepts either, otherwise the eval punishes the model for our ambiguity.
     acceptable_categories: list[Category] = Field(default_factory=list)
+    # Deterministic, case-specific constraints on the summary. `must_include`
+    # is for identifiers an agent needs to act on; `must_not_include` is for
+    # content that must never be copied into a ticket, such as card digits.
+    must_include: list[str] = Field(default_factory=list)
+    must_not_include: list[str] = Field(default_factory=list)
 
     def accepts(self, category: Category) -> bool:
         return category == self.expected_category or category in self.acceptable_categories
@@ -128,6 +151,7 @@ class CaseResult(BaseModel):
     completion_tokens: int = 0
     error: str | None = None
     difficulty: Difficulty = Difficulty.EASY
+    assertion_failures: list[AssertionFailure] = Field(default_factory=list)
 
     @property
     def total_tokens(self) -> int:

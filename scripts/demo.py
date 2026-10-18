@@ -59,7 +59,7 @@ def _synthetic_run(index: int, composite_score: float):
         run_id=f"seed-{index:02d}",
         created_at=f"2026-07-{index + 1:02d}T09:00:00+00:00",
         prompt_version="v2-tightened",
-        dataset_version="2026-08-20.v1",
+        dataset_version="2026-10-18.v2",
         model="gpt-4o-mini",
         provider="mock",
         total_cases=60,
