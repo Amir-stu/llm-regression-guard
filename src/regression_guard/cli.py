@@ -2,6 +2,7 @@
 
     rg run       - evaluate a prompt, diff against baseline, report, alert
     rg history   - list recent runs
+    rg analyze   - bucket a stored run's failures into named failure modes
     rg validate  - check the golden dataset and prompt files without spending tokens
 
 Exit codes are the contract with CI:
@@ -23,6 +24,7 @@ from pathlib import Path
 from .compare import compare_runs
 from .config import DEFAULT_SUMMARY_PASS_THRESHOLD, Settings
 from .drift import detect_drift
+from .error_analysis import ErrorAnalysis, analyse, render_markdown, render_text
 from .models import Comparison, Verdict
 from .prompts import list_prompts, load_prompt, resolve_prompt
 from .report import write_report
@@ -51,7 +53,7 @@ def git_sha() -> str:
         return ""
 
 
-def _markdown_summary(comparison: Comparison, report_path: Path) -> str:
+def _markdown_summary(comparison: Comparison, report_path: Path, analysis: ErrorAnalysis) -> str:
     current = comparison.current
     icon = {Verdict.PASS: "✅", Verdict.WARN: "⚠️", Verdict.CRITICAL: "🚨"}[comparison.verdict]
     lines = [
@@ -102,6 +104,7 @@ def _markdown_summary(comparison: Comparison, report_path: Path) -> str:
                 f"| `{flip.case_id}` | `{flip.expected_category.value}` | `{old}` | `{new}` |"
             )
         lines += ["", "</details>"]
+    lines += ["", render_markdown(analysis)]
     lines += ["", f"Full HTML diff report: `{report_path.name}` (CI artifact `eval-report`)."]
     return "\n".join(lines)
 
@@ -167,13 +170,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         {case.id: case for case in dataset.cases},
     )
 
+    analysis = analyse(
+        results,
+        summary_pass_threshold=args.summary_threshold,
+        baseline_results=baseline_results if baseline else None,
+    )
+
     store.save_run(summary, results)
     history = list(reversed(store.recent_runs(limit=max(15, settings.thresholds.drift_window + 3))))
     drift = detect_drift(list(reversed(history)), settings.thresholds)
     if drift.message:
         comparison.drift_warning = drift.message
 
-    report_path = write_report(comparison, settings.report_dir, history, drift)
+    report_path = write_report(comparison, settings.report_dir, history, drift, analysis)
     report_url = (
         f"{settings.report_base_url.rstrip('/')}/{report_path.name}"
         if settings.report_base_url
@@ -185,10 +194,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     if args.json_out:
         Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.json_out).write_text(json.dumps(comparison.as_dict(), indent=2), encoding="utf-8")
+        payload = {**comparison.as_dict(), "error_analysis": analysis.model_dump(mode="json")}
+        Path(args.json_out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     if args.markdown_out:
         Path(args.markdown_out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.markdown_out).write_text(_markdown_summary(comparison, report_path), encoding="utf-8")
+        Path(args.markdown_out).write_text(
+            _markdown_summary(comparison, report_path, analysis), encoding="utf-8"
+        )
 
     print(f"\nverdict: {comparison.verdict.value.upper()}")
     print(f"pass rate: {summary.pass_rate:.1%} ({summary.passed_cases}/{summary.total_cases})")
@@ -198,6 +210,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"  - {reason}")
     if drift.message:
         print(f"  ! {drift.message}")
+    print(render_text(analysis))
     print(f"report: {report_path}")
 
     if comparison.verdict is Verdict.CRITICAL:
@@ -222,6 +235,53 @@ def cmd_history(args: argparse.Namespace) -> int:
             f"{run.run_id:<14}{run.created_at[:19]:<21}{run.prompt_version:<18}"
             f"{run.pass_rate:>7.1%} {run.composite_score:>10.3f}{run.error_count:>8}"
         )
+    return EXIT_PASS
+
+
+def _write_artifact(path: str | None, content: str) -> None:
+    if path:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(content, encoding="utf-8")
+
+
+def cmd_analyze(args: argparse.Namespace) -> int:
+    """Error analysis on a stored run. Spends no tokens: it re-reads results.
+
+    Without --baseline, the latest run is compared against the same baseline
+    `rg run` would pick. An older run given by --run-id gets no automatic
+    baseline, because the automatic pick could be a run made after it.
+    """
+    store = RunStore(Settings.from_env().db_path)
+    latest = store.recent_runs(limit=1)
+    if not latest:
+        print("no runs recorded yet")
+        return EXIT_PASS
+    run = store.get_run(args.run_id) if args.run_id else latest[0]
+    if run is None:
+        print(f"error: no run with id {args.run_id!r}", file=sys.stderr)
+        return EXIT_ERROR
+    if args.baseline:
+        baseline = store.get_run(args.baseline)
+        if baseline is None:
+            print(f"error: no run with id {args.baseline!r}", file=sys.stderr)
+            return EXIT_ERROR
+    elif run.run_id == latest[0].run_id:
+        baseline = store.latest_baseline(
+            exclude_run_id=run.run_id, prompt_version=run.prompt_version, model=run.model
+        )
+    else:
+        baseline = None
+
+    analysis = analyse(
+        store.get_case_results(run.run_id),
+        summary_pass_threshold=args.summary_threshold,
+        baseline_results=store.get_case_results(baseline.run_id) if baseline else None,
+    )
+    against = f" | baseline {baseline.run_id} ({baseline.prompt_version})" if baseline else ""
+    print(f"run {run.run_id} | prompt {run.prompt_version} | model {run.model}{against}")
+    print(render_text(analysis, limit=len(analysis.buckets)))
+    _write_artifact(args.markdown_out, render_markdown(analysis))
+    _write_artifact(args.json_out, json.dumps(analysis.model_dump(mode="json"), indent=2))
     return EXIT_PASS
 
 
@@ -290,6 +350,15 @@ def build_parser() -> argparse.ArgumentParser:
     history.add_argument("--limit", type=int, default=20)
     history.add_argument("--prompt", default=None, help="filter by prompt version")
     history.set_defaults(func=cmd_history)
+
+    analyze = sub.add_parser("analyze", help="bucket a stored run's failures into failure modes")
+    analyze.add_argument("--run-id", default=None, help="run to analyse; default is the latest")
+    analyze.add_argument("--baseline", default=None, help="run id to compute per-mode deltas against")
+    analyze.add_argument("--summary-threshold", type=int, default=DEFAULT_SUMMARY_PASS_THRESHOLD,
+                         help="judge score (1-5) below which a summary counts as off-target")
+    analyze.add_argument("--markdown-out", default=None, help="write the analysis as markdown")
+    analyze.add_argument("--json-out", default=None, help="write the analysis as JSON")
+    analyze.set_defaults(func=cmd_analyze)
 
     validate = sub.add_parser("validate", help="validate dataset and prompts without calling any model")
     validate.set_defaults(func=cmd_validate)

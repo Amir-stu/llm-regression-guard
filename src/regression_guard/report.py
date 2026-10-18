@@ -15,6 +15,7 @@ from html import escape
 from pathlib import Path
 
 from .drift import DriftReport
+from .error_analysis import ErrorAnalysis
 from .models import Comparison, RunSummary, Verdict
 
 _VERDICT_LABEL = {
@@ -198,10 +199,43 @@ def _per_category_table(comparison: Comparison) -> str:
     )
 
 
+def _failure_mode_table(analysis: ErrorAnalysis | None) -> str:
+    if analysis is None:
+        return '<p class="empty">Error analysis was not run for this report.</p>'
+    if not analysis.buckets:
+        return '<p class="empty">No failed cases.</p>'
+    rows = []
+    for bucket in analysis.buckets:
+        delta = "-" if bucket.delta is None else f"{bucket.delta:+d}"
+        examples = "<br>".join(
+            f'<span class="mono">{escape(e.case_id)}</span> {escape(e.detail[:160])}' for e in bucket.examples
+        )
+        rows.append(
+            f"<tr><td><code>{escape(bucket.mode.value)}</code></td>"
+            f'<td class="num">{bucket.count}</td><td class="num">{_pct(bucket.share_of_failures)}</td>'
+            f'<td class="num">{delta}</td><td>{examples}</td></tr>'
+        )
+    misroutes = ", ".join(f"{escape(pair)} ({count})" for pair, count in analysis.misroutes.items())
+    soft = ", ".join(f"{escape(b.mode.value)} ({b.count})" for b in analysis.soft_findings)
+    notes = "".join(
+        f'<p class="meta">{label}: {text}</p>'
+        for label, text in (("Misroutes", misroutes), ("Soft findings, not counted as failures", soft))
+        if text
+    )
+    return (
+        f'<p class="meta">{analysis.failed_cases} of {analysis.total_cases} cases failed. '
+        "A case can carry several modes, so shares can sum past 100%.</p>"
+        '<div class="scroll"><table><thead><tr><th>Failure mode</th><th class="num">Cases</th>'
+        '<th class="num">Share of failures</th><th class="num">vs baseline</th><th>Examples</th>'
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>" + notes
+    )
+
+
 def render_report(
     comparison: Comparison,
     history: list[RunSummary] | None = None,
     drift: DriftReport | None = None,
+    analysis: ErrorAnalysis | None = None,
 ) -> str:
     current = comparison.current
     baseline = comparison.baseline
@@ -279,6 +313,9 @@ commit <code>{escape(current.git_sha[:12] or 'local')}</code><br>
 <h2>Per-category accuracy</h2>
 {_per_category_table(comparison)}
 
+<h2>Failure modes</h2>
+{_failure_mode_table(analysis)}
+
 <h2>Regressed cases ({len(comparison.regressions)})</h2>
 {_regression_rows(comparison)}
 
@@ -296,11 +333,12 @@ def write_report(
     output_dir: str | Path,
     history: list[RunSummary] | None = None,
     drift: DriftReport | None = None,
+    analysis: ErrorAnalysis | None = None,
 ) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"report-{comparison.current.run_id}.html"
-    path.write_text(render_report(comparison, history, drift), encoding="utf-8")
+    path.write_text(render_report(comparison, history, drift, analysis), encoding="utf-8")
     latest = output_dir / "index.html"
     latest.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     return path
