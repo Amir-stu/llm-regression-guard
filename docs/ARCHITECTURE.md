@@ -13,9 +13,11 @@ data/*.json    ──┘      │                           │
                      provider                       │        │
                    (openai|mock)                    │        ├──> report (HTML)
                         │                           │        └──> slack
-                      judge                    store (SQLite)
+              assertions + judge               store (SQLite)
                                                     │
-                                                    └──> drift (rolling window)
+                                                    ├──> drift (rolling window)
+                                                    ├──> error analysis (failure modes)
+                                                    └──> dashboard (Streamlit, read-only)
 ```
 
 The runner produces numbers. `compare` decides whether those numbers should stop a merge.
@@ -36,7 +38,7 @@ report render would mean the report and the stored verdict could disagree after 
 
 Four dimensions per case: category match (binary), judge score (1–5), latency, tokens.
 
-A case passes on `category_match AND judge_score >= threshold`. The AND matters — a correct
+A case passes on `category_match AND judge_score >= threshold AND no hard assertion failed`. The AND matters — a correct
 category with a summary that says the opposite of the email is not a pass, and averaging the two
 into a single number would let one hide the other.
 
@@ -58,6 +60,40 @@ an integration fault. Three options were considered:
 
 The tests enforce that any case with `acceptable_categories` has a substantive `notes` field, so
 the reason survives the next person who maintains the file.
+
+## Deterministic assertions
+
+`assertions.py` runs before the judge result is used and does not depend on it. The split is
+deliberate: anything a rule can decide, a rule decides. A rule costs nothing, never drifts, and
+cannot be persuaded by fluent text. The judge is kept for what rules cannot do, namely whether
+the summary captures the request.
+
+Hard checks fail the case. Soft checks are recorded and counted, and never change a verdict.
+`strict_json` is soft because `parse_output` salvages fenced JSON on purpose, so failing the case
+on it would undo that decision. Counting it still shows when a prompt is losing hold of the
+format.
+
+`numbers_grounded` is the cheapest hallucination check that is actually useful in support
+triage: every digit token in the summary must appear in the email. It misses numbers written as
+words. That is accepted rather than patched with a number-word parser that would add false
+negatives of its own.
+
+The schema moved to version 2 with an `assertion_failures` column on `case_results`.
+`RunStore._migrate` adds the column in place on open, because run history is the baseline and
+an upgrade must never require deleting it.
+
+## Error analysis
+
+`error_analysis.py` maps each failed case to failure modes from signals already recorded, with
+no extra model calls. That is why `rg analyze` is free to run on any historical run. Two counts
+are kept on purpose: multi-label buckets, which say how often each problem occurs, and one
+primary mode per case by severity, which partitions the failures. Ranking uses the first. A
+partition-only view would hide that most misrouted cases in v3 also break the format contract.
+
+Rejected: asking the judge model to label failure modes. It would make the taxonomy as noisy as
+the judge, cost a call per failure, and make `rg analyze` non-reproducible. Open-ended labelling
+by a model is useful for discovering *new* modes in a sample. Once a mode is named, it should
+become a rule here.
 
 ## Statistics
 
@@ -186,6 +222,10 @@ Honest list of gaps, in rough priority order:
 - **No inter-rater agreement check on the judge.** The judge is trusted without ever being
   validated against a human. The right fix is to hand-score a sample of summaries and measure
   agreement, then track that number over time. Without it, judge drift is invisible.
+- **The mock judge rewards truncation.** It scores word overlap, and truncated email text
+  overlaps the reference well, so `v3-terse` raises the mean judge score while failing 43
+  format checks. The assertion layer covers this case. The general lesson is the gap above:
+  any judge needs validating against human scores.
 - **No cost tracking in currency.** Tokens are recorded per case but never priced, so the
   cost/quality trade-off of a prompt change has to be eyeballed.
 - **No retry/variance runs.** Against a real API, running each case once conflates sampling
