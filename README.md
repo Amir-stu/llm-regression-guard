@@ -7,6 +7,8 @@ showing the old and new output side by side. Every run also gets an error analys
 bucketed into named failure modes and ranked, so the report says what to fix next, not just how
 much got worse.
 
+Live dashboard: [llm-regression-guard.streamlit.app](https://llm-regression-guard.streamlit.app)
+
 The feature under test is a support-email triage function (category + one-sentence summary).
 It is deliberately small — the subject of this repo is the machinery around it.
 
@@ -158,6 +160,11 @@ stays at zero offline. The check is covered by unit tests and fires against a re
 ---
 
 ## Dashboard
+
+**Live: [llm-regression-guard.streamlit.app](https://llm-regression-guard.streamlit.app)**. It is
+seeded with the offline demo runs (mock provider, simulated outputs, no model called).
+
+To run it locally against your own history:
 
 ```bash
 pip install -e ".[dashboard]"
